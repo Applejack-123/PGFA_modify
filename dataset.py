@@ -1,14 +1,16 @@
 import torch
 import numpy as np
-
 class DataSet(torch.utils.data.Dataset):
 
     def __init__(self,
                  data_path: str,
-                 label_path: str,):
+                 label_path: str,
+                 rgb_path: str,
+                 ):
 
         self.data_path = data_path
         self.label_path = label_path
+        self.rgb_path = rgb_path
         self.load_data()
         
 
@@ -16,6 +18,7 @@ class DataSet(torch.utils.data.Dataset):
 
         self.data = np.load(self.data_path)
         self.label = np.load(self.label_path)
+        self.rgb = np.load(self.rgb_path)
         self.size = len(self.label)
 
     def __len__(self) -> int:
@@ -25,5 +28,6 @@ class DataSet(torch.utils.data.Dataset):
 
         data = self.data[index]
         label = self.label[index]
-
-        return data, label
+        rgb = self.rgb[index]
+        return data, label,rgb
+        #return data,label
