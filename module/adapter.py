@@ -11,7 +11,7 @@ def conv_init(conv):
         nn.init.constant_(conv.bias, 0)
 
 class Linear(nn.Module):
-    def __init__(self, hidden_size=256, output_size=768):
+    def __init__(self, hidden_size=256, output_size=512):
         super(Linear, self).__init__()
         self.adapter = nn.Linear(hidden_size, output_size)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)).cuda()
@@ -31,13 +31,14 @@ class Linear(nn.Module):
 
 
 class Adapter(nn.Module):
-    def __init__(self, hidden_size=256, output_size=768):
+    def __init__(self, hidden_size=256, output_size=512):
         super(Adapter, self).__init__()
         self.fc1 = nn.Linear(hidden_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, output_size)
         self.fc3 = nn.Linear(hidden_size, output_size, bias=False)
         self.act = nn.GELU()
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)).cuda()
+        self.logit_scale_v2 = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         conv_init(self.fc1)
         conv_init(self.fc2)
         conv_init(self.fc3)
@@ -50,5 +51,8 @@ class Adapter(nn.Module):
     
     def get_logit_scale(self):
         return self.logit_scale
+    
+    def get_logit_scale_v2(self):  # 添加这个方法
+        return self.logit_scale_v2
 
 
