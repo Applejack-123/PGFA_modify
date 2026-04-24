@@ -1,41 +1,42 @@
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from .utils.tgcn import ConvTemporalGraphical
 from .utils.graph import Graph
 
 class Model(nn.Module):
-    r"""Spatial temporal graph convolutional networks."""
-    
     def __init__(self, in_channels, hidden_channels, hidden_dim, graph_args,
-                 edge_importance_weighting, **kwargs):
+                 edge_importance_weighting, target_frames=8, **kwargs):
         super().__init__()
-
+        
+        self.target_frames = target_frames
+        
         # load graph
         self.graph = Graph(**graph_args)
         A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
         self.register_buffer('A', A)
         self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
-        # build networks
+        
         spatial_kernel_size = A.size(0)
         temporal_kernel_size = 9
         kernel_size = (temporal_kernel_size, spatial_kernel_size)
         kwargs0 = {k: v for k, v in kwargs.items() if k != 'dropout'}
+        
+        # 保持原始网络结构（包含下采样）
         self.st_gcn_networks = nn.ModuleList((
             st_gcn(in_channels, hidden_channels, kernel_size, 1, residual=False, **kwargs0),
             st_gcn(hidden_channels, hidden_channels, kernel_size, 1, **kwargs),
             st_gcn(hidden_channels, hidden_channels, kernel_size, 1, **kwargs),
             st_gcn(hidden_channels, hidden_channels, kernel_size, 1, **kwargs),
-            st_gcn(hidden_channels, hidden_channels * 2, kernel_size, 2, **kwargs),
+            st_gcn(hidden_channels, hidden_channels * 2, kernel_size, 2, **kwargs),  # stride=2
             st_gcn(hidden_channels * 2, hidden_channels * 2, kernel_size, 1, **kwargs),
             st_gcn(hidden_channels * 2, hidden_channels * 2, kernel_size, 1, **kwargs),
-            st_gcn(hidden_channels * 2, hidden_channels * 4, kernel_size, 2, **kwargs),
+            st_gcn(hidden_channels * 2, hidden_channels * 4, kernel_size, 2, **kwargs),  # stride=2
             st_gcn(hidden_channels * 4, hidden_channels * 4, kernel_size, 1, **kwargs),
             st_gcn(hidden_channels * 4, hidden_dim, kernel_size, 1, **kwargs),
         ))
 
-        # initialize parameters for edge importance weighting
         if edge_importance_weighting:
             self.edge_importance = nn.ParameterList([
                 nn.Parameter(torch.ones(self.A.size()))
@@ -45,9 +46,9 @@ class Model(nn.Module):
             self.edge_importance = [1] * len(self.st_gcn_networks)
 
     def forward(self, x, ignore_joint=[]):
-
-        # data normalization
         N, C, T, V, M = x.size()
+        
+        # data normalization
         x = x.permute(0, 4, 3, 1, 2).contiguous()
         x = x.view(N * M, V * C, T)
         x = self.data_bn(x)
@@ -55,21 +56,29 @@ class Model(nn.Module):
         x = x.permute(0, 1, 3, 4, 2).contiguous()
         x = x.view(N * M, C, T, V)
 
-        #1.获取未被mask掉的节点序列
         all_joint = set(range(V))
         remain_joint = list(all_joint - set(ignore_joint))
         remain_joint = sorted(remain_joint)
-        x = x[:,:,:,remain_joint]
+        x = x[:, :, :, remain_joint]
 
         for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
             x, _ = gcn(x, self.A * importance, remain_joint)
         
-        # print(x.shape)
-
-        x = F.avg_pool2d(x, x.size()[2:])
-        # print(x.shape)
-        x = x.view(N, M, -1).mean(dim=1)
-
+        # x.shape: (N*M, hidden_dim, T_out, V)
+        # T_out = T / 4 ≈ 12.5 → 12 或 13
+        
+        # 空间池化
+        x = x.mean(dim=-1)  # (N*M, hidden_dim, T_out)
+        x = x.view(N, M, -1, x.size(-1))  # (N, M, hidden_dim, T_out)
+        x = x.mean(dim=1)  # (N, hidden_dim, T_out)
+        
+        # ✅ 关键：插值到 8 帧
+        # (N, hidden_dim, T_out) -> (N, hidden_dim, 8)
+        x = F.interpolate(x, size=self.target_frames, mode='linear', align_corners=False)
+        
+        # 输出 (N, 8, hidden_dim)
+        x = x.permute(0, 2, 1)
+        
         return x
 
 

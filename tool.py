@@ -36,6 +36,10 @@ def get_m_theta(cos_theta, m=4):
 
 
 def create_logits(x1, x2, logit_scale, exp=True):
+    if len(x1.shape) == 3:
+        x1 = x1.mean(dim=1)  # (N, T, D) -> (N, D)
+    if len(x2.shape) == 3:
+        x2 = x2.mean(dim=1)
     x1 = x1 / x1.norm(dim=-1, keepdim=True)
     x2 = x2 / x2.norm(dim=-1, keepdim=True)
     if exp:
@@ -60,6 +64,10 @@ def create_sim_matrix(x1, x2, alpha=1):
     
 
 def get_acc(x1, x2, unseen_label, label):
+    if len(x1.shape) == 3:
+        x1 = x1.mean(dim=1)  # (N, T, D) -> (N, D)
+    if len(x2.shape) == 3:
+        x2 = x2.mean(dim=1)
     x1 = x1 / x1.norm(dim=-1, keepdim=True)
     x2 = x2 / x2.norm(dim=-1, keepdim=True)
     logits = x1 @ x2.t() # 128, 5
