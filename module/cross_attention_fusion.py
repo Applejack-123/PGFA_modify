@@ -38,7 +38,7 @@ class CrossAttentionFusion(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
         # 可学习的融合权重
-        self.fusion_weight = nn.Parameter(torch.tensor(0.3))
+        self.fusion_weight = nn.Parameter(torch.tensor(0.5))
         
         # 拼接后的投影层
         self.concat_proj = nn.Linear(feature_dim * 2, feature_dim)
@@ -52,11 +52,11 @@ class CrossAttentionFusion(nn.Module):
         Returns:
             fused_feat: [batch_size, seq_len, feature_dim] 融合后的特征
         """
-        batch_size, seq_len, _ = skeleton_feat.shape  # ✅ 修改1：获取 seq_len
+        batch_size, seq_len, _ = skeleton_feat.shape
         
         # ========== 1. 单向交叉注意力 ==========
         # 已经是 [B, T, D]，不需要 unsqueeze
-        skeleton_seq = skeleton_feat  # [B, T, D]  ✅ 修改2：直接使用
+        skeleton_seq = skeleton_feat  # [B, T, D]
         rgb_seq = rgb_feat            # [B, T, D]
         
         # LayerNorm

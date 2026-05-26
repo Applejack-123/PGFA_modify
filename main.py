@@ -61,23 +61,10 @@ class Processor:
             num_workers=16,
             shuffle=False)
 
-    # def load_weights(self, model=None, weight_path=None):
-    #     pretrained_dict = torch.load(weight_path)
-    #     model.load_state_dict(pretrained_dict)
-        '''
-    def load_weights(self, model=None, weight_path=None):
-        #pretrained_dict = torch.load(weight_path)
-        checkpoint = torch.load(weight_path) #+++
-        key = ('encoder' if model is self.encoder 
-               else 'adapter' if model is self.adapter 
-               else 'proj' 
-               )
-        pretrained_dict = checkpoint[key]#+++
-        model.load_state_dict(pretrained_dict)
-        '''
+
     def load_weights(self, model=None, weight_path=None):
         checkpoint = torch.load(weight_path)
-    
+        
         # 如果传入 model，只加载对应模块
         if model is not None:
             if model is self.encoder and 'encoder' in checkpoint:
@@ -88,6 +75,8 @@ class Processor:
                 model.load_state_dict(checkpoint['proj'])
             elif model is self.fusion and 'fusion' in checkpoint:
                 model.load_state_dict(checkpoint['fusion'])
+            elif model is self.causal and 'causal' in checkpoint:
+                model.load_state_dict(checkpoint['causal'])
             else:
                 model.load_state_dict(checkpoint, strict=False)
         else:
@@ -98,8 +87,9 @@ class Processor:
                 self.adapter.load_state_dict(checkpoint['adapter'])
             if 'proj' in checkpoint:
                 self.proj.load_state_dict(checkpoint['proj'])
-            if 'fusion' in checkpoint:
-                self.fusion.load_state_dict(checkpoint['fusion'])
+            if 'causal' in checkpoint:
+                self.causal.load_state_dict(checkpoint['causal'])
+                
         
     def adjust_learning_rate(self,optimizer,current_epoch, max_epoch,lr_min=0,lr_max=0.1,warmup_epoch=15, loss_mode='step', step=[50, 80]):
 
@@ -138,7 +128,6 @@ class Processor:
                             )
         self.encoder = self.encoder.cuda()
         self.adapter = Linear().cuda()
-        #self.adapter = Adapter(hidden_size=256, output_size=512).cuda()
 
         self.proj = nn.Sequential(
         nn.LayerNorm(language_size),
@@ -146,17 +135,21 @@ class Processor:
         nn.ReLU(),
         nn.Dropout(0.3)
         ).cuda()
-
+        
+        self.concat_proj = nn.Sequential(
+        nn.Linear(1024, 512),
+        nn.ReLU(),
+        nn.LayerNorm(512),
+        nn.Dropout(0.3)
+        ).cuda()
+        
         self.fusion = CrossAttentionFusion(
         feature_dim=512,
         num_heads=8,
         dropout=0.3
         ).cuda()
 
-        self.causal = Causal(
-            feature_dim=512, 
-            state_size=512
-        ).cuda()
+        self.causal = Causal(dim=512).cuda()
         
         if loss_type == "kl" or loss_type == "klv2" or loss_type == "kl+cosface" or loss_type == "kl+sphereface" or "kl+margin":
             self.loss = KLLoss().cuda()
@@ -178,7 +171,9 @@ class Processor:
             self.load_weights(self.adapter, weight_path)
             self.load_weights(self.proj, weight_path)
             self.load_weights(self.fusion, weight_path)
-        #++++++++++
+            #self.load_weights(self.concat_proj, weight_path)
+            #self.load_weights(self.causal, weight_path)
+        '''#++++++++++
         if fix_encoder:# 冻结！
             for param in self.encoder.parameters():
                 param.requires_grad = False  
@@ -188,23 +183,38 @@ class Processor:
                 param.requires_grad = False
             for param in self.fusion.parameters():
                 param.requires_grad = False
-        #++++++++++
+        #++++++++++'''
 
 
     @ex.capture
     def load_optim(self, lr, epoch_num, weight_decay):
+        
         self.optimizer = torch.optim.SGD([
-            {'params': self.encoder.parameters()},
-            {'params': self.adapter.parameters()},
-            {'params': self.proj.parameters()},  # 新增
-            {'params': self.fusion.parameters()},
-            #{'params': self.causal.parameters()}# 新增
+            #{'params': self.encoder.parameters()},
+            #{'params': self.adapter.parameters()},
+            #{'params': self.proj.parameters()},
+            #{'params': self.fusion.parameters()},
+            #{'params': self.concat_proj.parameters()},
+            {'params': self.causal.parameters()}
             ],
              lr=lr,
              weight_decay=weight_decay,
              momentum=0.9,
              nesterov=False
              )
+        '''
+        self.optimizer = torch.optim.AdamW([
+            {
+                'params': self.fusion.parameters(),
+                'lr': 1e-5
+            },
+            {
+                'params': self.causal.parameters(),
+                'lr': 1e-6
+            }],
+            weight_decay=0.001
+            )
+        '''
         # self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, 100)
 
     @ex.capture
@@ -232,7 +242,7 @@ class Processor:
         self.adapter.train()
         self.proj.train()
         self.fusion.train()
-        #self.causal.train()
+        self.causal.train()
         if fix_encoder:
             self.encoder.eval()
             self.adapter.train()
@@ -242,30 +252,27 @@ class Processor:
         running_loss = []
         loader = self.data_loader['train']
         for data, label,rgb in tqdm(loader):
-            data = data.type(torch.FloatTensor).cuda()
-            #print(data.shape) #128,3,50,25,2
-            # label = label.type(torch.LongTensor).cuda()
+            data = data.type(torch.FloatTensor).cuda()#128,3,50,25,2
             label_g = gen_label(label)
-            label = label.type(torch.LongTensor).cuda()
-            # print(label.shape) # 128
-            # print(label) # int
+            label = label.type(torch.LongTensor).cuda()# 128
             seen_language = self.full_language[label] # 128, 768
             seen_language_512=self.proj(seen_language)# 512
-           
-            # print(seen_language.shape)
             
-            feat = self.encoder(data)
-            if fix_encoder:
-                feat = feat.detach()
-            skleton_feat = self.adapter(feat)
-            rgb_feat = rgb.type(torch.FloatTensor).cuda()
+            skeleton_feat = self.encoder(data)# 128, 8, 256
+            skeleton_feat = self.adapter(skeleton_feat)# 128, 8, 512
+            
+            rgb_feat = rgb.type(torch.FloatTensor).cuda()# 128, 8, 512
+            
+            #fusion_input = torch.cat([skeleton_feat, rgb_feat],dim=-1);fused_512 = self.concat_proj(fusion_input)
+            fused_512 = self.fusion(skeleton_feat,rgb_feat)# 128, 8, 512
+            causal_out = self.causal(fused_512)
 
-            fused_512 = self.fusion(skleton_feat,rgb_feat)
-            #fused_512 = self.causal(fused_512)
+            fused_512 = causal_out["feature"]
 
             if loss_type == "kl":
-                logits_per_skl, logits_per_text = create_logits(fused_512, seen_language_512, self.logit_scale, exp=True)
-                ground_truth = torch.tensor(label_g, dtype=skleton_feat.dtype).cuda()
+                feature = fused_512
+                logits_per_skl, logits_per_text = create_logits(feature, seen_language_512, self.logit_scale, exp=True)
+                ground_truth = torch.tensor(label_g, dtype=feature.dtype).cuda()
                 # ground_truth = gen_label_from_text_sim(seen_language)
                 loss_skls = self.loss(logits_per_skl, ground_truth)
                 loss_texts = self.loss(logits_per_text, ground_truth)
@@ -353,7 +360,7 @@ class Processor:
         self.adapter.eval()
         self.proj.eval()
         self.fusion.eval()
-        #self.causal.eval()
+        self.causal.eval()
 
         loader = self.data_loader['test']
         y_true = []
@@ -364,24 +371,26 @@ class Processor:
         old_pred_list = []
         for data, label,rgb in tqdm(loader):
 
-            # y_t = label.numpy().tolist()
-            # y_true += y_t
-
             data = data.type(torch.FloatTensor).cuda()
             label = label.type(torch.LongTensor).cuda()
             rgb_feat = rgb.type(torch.FloatTensor).cuda()
 
             unseen_language = self.full_language[unseen_label]
             unseen_language_512=self.proj(unseen_language)
-            # inference
-            feature = self.encoder(data)
-            #print("after encoder:",feature.shape)
-            feature = self.adapter(feature)
-            #print("after adapter:",feature.shape)
-
-            fused_512=self.fusion(feature,rgb_feat)
-            #fused_512 = self.causal(fused_512)
             
+            skeleton_feat = self.encoder(data)
+            skeleton_feat = self.adapter(skeleton_feat)
+            
+            rgb_feat = rgb.type(torch.FloatTensor).cuda()
+            #rgb_feat = self.causal(rgb_feat,skeleton_feat)
+
+            #fusion_input = torch.cat([skeleton_feat, rgb_feat],dim=-1);fused_512 = self.concat_proj(fusion_input)
+            fused_512=self.fusion(skeleton_feat,rgb_feat)
+            #fused_512 = self.causal(fused_512,skeleton_feat)
+            
+            
+            causal_out = self.causal(fused_512)
+            fused_512 = causal_out["feature"]
             if DA:
             # acc_batch, pred = get_acc(feature, unseen_language, unseen_label, label)
                 acc_batch, pred, old_pred, ent, feat = get_acc_v2(fused_512, unseen_language_512, unseen_label, label)
@@ -409,53 +418,6 @@ class Processor:
             # np.save("y_pred_3.npy",y_pred)
             # print("save ok!")
         self.test_acc = acc
-        
-        if DA:
-            ent_all = torch.cat(ent_list)
-            feat_all = torch.cat(feat_list)
-            old_pred_all = torch.cat(old_pred_list)
-            z_list = []
-            for i in range(len(unseen_label)):
-                mask = old_pred_all == i
-                class_support_set = feat_all[mask]
-                class_ent = ent_all[mask]
-                class_len = class_ent.shape[0]
-                if int(class_len*support_factor) < 1:
-                    z = self.full_language[unseen_label[i:i+1]]
-                else:
-                    _, indices = torch.topk(-class_ent, int(class_len*support_factor))
-                    z = torch.mean(class_support_set[indices], dim=0, keepdim=True)
-                z_list.append(z)
-                
-            z_tensor = torch.cat(z_list)
-            aug_acc_list = []
-            for data, label,rgb in tqdm(loader):
-                # y_t = label.numpy().tolist()
-                # y_true += y_t
-
-                data = data.type(torch.FloatTensor).cuda()
-                label = label.type(torch.LongTensor).cuda()
-                rgb_feat = rgb.type(torch.FloatTensor).cuda()
-                unseen_language = z_tensor
-                unseen_language_512=self.proj(unseen_language)
-                # inference
-                feature = self.encoder(data)
-                feature = self.adapter(feature)
-
-                fused_512=self.fusion(feature,rgb_feat)
-                
-                # acc_batch, pred = get_acc(feature, unseen_language, unseen_label, label)
-                acc_batch, pred = get_acc(fused_512, unseen_language_512, unseen_label, label)
-            
-                # y_p = pred.cpu().numpy().tolist()
-                # y_pred += y_p
-                aug_acc_list.append(acc_batch)
-            aug_acc = torch.tensor(aug_acc_list).mean()
-            if aug_acc > self.best_aug_acc:
-                self.best_aug_acc = aug_acc
-                self.best_aug_epoch = epoch
-            self.test_aug_acc = aug_acc
-            
 
 
     def initialize(self):
@@ -470,7 +432,9 @@ class Processor:
         torch.save({'encoder':self.encoder.state_dict(),
                     'adapter':self.adapter.state_dict(),
                     'proj': self.proj.state_dict(),
-                    'fusion': self.fusion.state_dict(), }, save_path)
+                    'fusion': self.fusion.state_dict(),
+                    'causal': self.causal.state_dict(),
+                   }, save_path)
 
     def start(self):
         self.initialize()

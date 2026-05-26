@@ -8,27 +8,27 @@ def my_config():
     track = "main" # main or sota
     split = '1'
     dataset = "ntu60" # ntu60: split 1-3, sota_split 5,12; ntu120: split 4-6, sota_split 10,24; pku: split 7-9
-    lr = 0.05 # 0.05 for ntu60 and pku, 0.005 for ntu120
+    lr = 0.0005 # 0.05 for ntu60 and pku, 0.005 for ntu120
     margin = 0.1
     weight_decay = 0.0005
-    epoch_num = 25
+    epoch_num = 40
     batch_size = 128 #128
     loss_type = "kl"
     alpha = 1
     beta = 1
     m = 1
     DA = False # DA means using our prototype-guided text feature alignment
-    fix_encoder = False
+    fix_encoder = True
     finetune = True
     support_factor = 0.9 # 0.9 for ntu60, 0.4 for ntu120, 1.0 for pku
     #weight_path= './output/model/split_{}_{}_DA_des_support_factor{}_lr{}.pt'.format(split,loss_type,support_factor,lr)
-    weight_path = './module/split_1_klv2_fusion_best.pt'
+    weight_path = './module/fusion_SCI_T.pt'
     log_path = './output/log/split_{}_{}_DA_des_support_factor{}_lr{}.log'.format(split,loss_type,support_factor,lr)
     # log_path = './output/log/sota_split10_des_DA_epoch100_lr{}_support_factor{}.log'.format(lr, support_factor)
 
     save_path = './output/model/split_{}_{}_DA_des_support_factor{}_lr{}.pt'.format(split,loss_type,support_factor,lr)
-    loss_mode = "step" # "step" or "cos"
-    step = [50, 80]
+    loss_mode = "cos" # "step" or "cos"
+    step = [20, 30]
     ############################## ST-GCN ###############################
     in_channels = 3
     hidden_channels = 16
