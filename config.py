@@ -8,7 +8,7 @@ def my_config():
     track = "main" # main or sota
     split = '1'
     dataset = "ntu60" # ntu60: split 1-3, sota_split 5,12; ntu120: split 4-6, sota_split 10,24; pku: split 7-9
-    lr = 0.0005 # 0.05 for ntu60 and pku, 0.005 for ntu120
+    lr = 1e-6 # 0.05 for ntu60 and pku, 0.005 for ntu120
     margin = 0.1
     weight_decay = 0.0005
     epoch_num = 40
@@ -21,8 +21,8 @@ def my_config():
     fix_encoder = True
     finetune = True
     support_factor = 0.9 # 0.9 for ntu60, 0.4 for ntu120, 1.0 for pku
-    #weight_path= './output/model/split_{}_{}_DA_des_support_factor{}_lr{}.pt'.format(split,loss_type,support_factor,lr)
-    weight_path = './module/fusion_SCI_T.pt'
+    #weight_path= './output/model/split_1_kl_DA_des_support_factor0.9_lr0.005.pt'
+    weight_path = './module/mabafusion_SCI_best.pt'
     log_path = './output/log/split_{}_{}_DA_des_support_factor{}_lr{}.log'.format(split,loss_type,support_factor,lr)
     # log_path = './output/log/sota_split10_des_DA_epoch100_lr{}_support_factor{}.log'.format(lr, support_factor)
 

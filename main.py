@@ -1,3 +1,4 @@
+#main.py
 from config import *
 from dataset import DataSet 
 from logger import Log
@@ -16,6 +17,8 @@ from module.adapter import Adapter, Linear
 from KLLoss import KLLoss, KDLoss
 from tool import gen_label, create_logits, get_acc, create_sim_matrix, gen_label_from_text_sim, get_m_theta, get_acc_v2
 from module.cross_attention_fusion import CrossAttentionFusion
+from cross_mamba import MambaFusion
+from temporal_mamba import TemporalMamba
 
 from Causal import CausalIntervention as Causal
 def setup_seed(seed):
@@ -65,33 +68,25 @@ class Processor:
     def load_weights(self, model=None, weight_path=None):
         checkpoint = torch.load(weight_path)
         
-        # 如果传入 model，只加载对应模块
-        if model is not None:
-            if model is self.encoder and 'encoder' in checkpoint:
-                model.load_state_dict(checkpoint['encoder'])
-            elif model is self.adapter and 'adapter' in checkpoint:
-                model.load_state_dict(checkpoint['adapter'])
-            elif model is self.proj and 'proj' in checkpoint:
-                model.load_state_dict(checkpoint['proj'])
-            elif model is self.fusion and 'fusion' in checkpoint:
-                model.load_state_dict(checkpoint['fusion'])
-            elif model is self.causal and 'causal' in checkpoint:
-                model.load_state_dict(checkpoint['causal'])
-            else:
-                model.load_state_dict(checkpoint, strict=False)
+        if model is self.encoder and 'encoder' in checkpoint:
+            model.load_state_dict(checkpoint['encoder'])
+        elif model is self.adapter and 'adapter' in checkpoint:
+            model.load_state_dict(checkpoint['adapter'])
+        elif model is self.proj and 'proj' in checkpoint:
+            model.load_state_dict(checkpoint['proj'])
+        elif model is self.fusion and 'fusion' in checkpoint:
+            model.load_state_dict(checkpoint['fusion'])
+        elif model is self.causal and 'causal' in checkpoint:
+            model.load_state_dict(checkpoint['causal'])
+        elif model is self.temporal_mamba and 'temporal_mamba' in checkpoint:
+            model.load_state_dict(checkpoint['temporal_mamba'])
+        elif model is self.mamba_fusion and 'mamba_fusion' in checkpoint:
+            model.load_state_dict(checkpoint['mamba_fusion'])
         else:
-            # 不传入 model，加载所有模块
-            if 'encoder' in checkpoint:
-                self.encoder.load_state_dict(checkpoint['encoder'])
-            if 'adapter' in checkpoint:
-                self.adapter.load_state_dict(checkpoint['adapter'])
-            if 'proj' in checkpoint:
-                self.proj.load_state_dict(checkpoint['proj'])
-            if 'causal' in checkpoint:
-                self.causal.load_state_dict(checkpoint['causal'])
+            raise Exception('cannot found the weight Error!')
                 
         
-    def adjust_learning_rate(self,optimizer,current_epoch, max_epoch,lr_min=0,lr_max=0.1,warmup_epoch=15, loss_mode='step', step=[50, 80]):
+    def adjust_learning_rate(self,optimizer,current_epoch, max_epoch,lr_min=0,lr_max=0.1,warmup_epoch=15, loss_mode='cos', step=[20,30]):
 
         if current_epoch < warmup_epoch:
             lr = lr_max * current_epoch / warmup_epoch
@@ -151,6 +146,9 @@ class Processor:
 
         self.causal = Causal(dim=512).cuda()
         
+        self.mamba_fusion = MambaFusion(num_layers=4).cuda()
+        self.temporal_mamba = nn.Sequential(TemporalMamba(512),TemporalMamba(512)).cuda()
+        
         if loss_type == "kl" or loss_type == "klv2" or loss_type == "kl+cosface" or loss_type == "kl+sphereface" or "kl+margin":
             self.loss = KLLoss().cuda()
         elif loss_type == "mse":
@@ -170,9 +168,11 @@ class Processor:
             self.load_weights(self.encoder, weight_path)
             self.load_weights(self.adapter, weight_path)
             self.load_weights(self.proj, weight_path)
-            self.load_weights(self.fusion, weight_path)
+            #self.load_weights(self.fusion, weight_path)
+            #self.load_weights(self.temporal_mamba, weight_path)
+            self.load_weights(self.causal, weight_path)
+            self.load_weights(self.mamba_fusion, weight_path)
             #self.load_weights(self.concat_proj, weight_path)
-            #self.load_weights(self.causal, weight_path)
         '''#++++++++++
         if fix_encoder:# 冻结！
             for param in self.encoder.parameters():
@@ -188,14 +188,15 @@ class Processor:
 
     @ex.capture
     def load_optim(self, lr, epoch_num, weight_decay):
-        
+        '''
         self.optimizer = torch.optim.SGD([
             #{'params': self.encoder.parameters()},
             #{'params': self.adapter.parameters()},
             #{'params': self.proj.parameters()},
             #{'params': self.fusion.parameters()},
-            #{'params': self.concat_proj.parameters()},
-            {'params': self.causal.parameters()}
+            #{'params': self.mamba_fusion.parameters()},
+            #{'params': self.temporal_mamba.parameters()},
+            #{'params': self.causal.parameters()}
             ],
              lr=lr,
              weight_decay=weight_decay,
@@ -203,20 +204,15 @@ class Processor:
              nesterov=False
              )
         '''
-        self.optimizer = torch.optim.AdamW([
-            {
-                'params': self.fusion.parameters(),
-                'lr': 1e-5
-            },
-            {
-                'params': self.causal.parameters(),
-                'lr': 1e-6
-            }],
-            weight_decay=0.001
-            )
-        '''
-        # self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, 100)
-
+        self.optimizer = torch.optim.AdamW(
+        [
+        {'params': self.causal.parameters(),    'lr': lr, 'weight_decay': 0.01},
+        {'params': self.mamba_fusion.parameters(), 'lr': 1e-8, 'weight_decay': 0.01},
+        ],
+        betas=(0.9, 0.999)
+        )
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=100, eta_min=1e-6)
+        
     @ex.capture
     def optimize(self, epoch_num, DA): # print -> log.info
         self.log.info("main track") 
@@ -248,7 +244,8 @@ class Processor:
             self.adapter.train()
             self.proj.train()
             self.fusion.train()
-        self.adjust_learning_rate(self.optimizer, current_epoch=epoch, max_epoch=100, lr_max=lr, warmup_epoch=5, loss_mode=loss_mode, step=step)
+        #self.adjust_learning_rate(self.optimizer, current_epoch=epoch, max_epoch=100, lr_max=lr, warmup_epoch=5, loss_mode=loss_mode, step=step)
+        self.scheduler.step()
         running_loss = []
         loader = self.data_loader['train']
         for data, label,rgb in tqdm(loader):
@@ -264,87 +261,26 @@ class Processor:
             rgb_feat = rgb.type(torch.FloatTensor).cuda()# 128, 8, 512
             
             #fusion_input = torch.cat([skeleton_feat, rgb_feat],dim=-1);fused_512 = self.concat_proj(fusion_input)
-            fused_512 = self.fusion(skeleton_feat,rgb_feat)# 128, 8, 512
-            causal_out = self.causal(fused_512)
-
-            fused_512 = causal_out["feature"]
+            #fused_512 = self.fusion(skeleton_feat,rgb_feat)# 128, 8, 512
+            mamba_fused = self.mamba_fusion(rgb_feat,skeleton_feat);causal_out = self.causal(mamba_fused);mamba_fused = causal_out["feature"]
+            #fused_512 = self.temporal_mamba(fused_512)
+            
+            #causal_out = self.causal(fused_512);fused_512 = causal_out["feature"]
 
             if loss_type == "kl":
-                feature = fused_512
+                #invariant_feature = causal_out["invariant_feature"];counterfactual_feature = causal_out["counterfactual_feature"];confounder_effect = causal_out["confounder_effect"]
+                
+                feature = mamba_fused
                 logits_per_skl, logits_per_text = create_logits(feature, seen_language_512, self.logit_scale, exp=True)
                 ground_truth = torch.tensor(label_g, dtype=feature.dtype).cuda()
                 # ground_truth = gen_label_from_text_sim(seen_language)
                 loss_skls = self.loss(logits_per_skl, ground_truth)
                 loss_texts = self.loss(logits_per_text, ground_truth)
-                loss = (loss_skls + loss_texts) / 2
-            elif loss_type == "kl+margin":
-                logits_per_skl, logits_per_text = create_logits(fused_512, seen_language_512, self.logit_scale, exp=True)
-                ground_truth = torch.tensor(label_g, dtype=skleton_feat.dtype).cuda()
-                ones = torch.ones_like(ground_truth).cuda()
-                ones -= m
-                logits_per_skl = torch.where(ones<logits_per_skl, ones, logits_per_skl) * ground_truth + (1-ground_truth) * logits_per_skl
-                logits_per_text = torch.where(ones<logits_per_text, ones, logits_per_text) * ground_truth + (1-ground_truth) * logits_per_text
-                loss_skls = self.loss(logits_per_skl, ground_truth)
-                loss_texts = self.loss(logits_per_text, ground_truth)
-                loss = (loss_skls + loss_texts) / 2
+                cls_loss = (loss_skls + loss_texts) / 2
+                #cf_loss = F.mse_loss(invariant_feature,counterfactual_feature)
+                #conf_loss = (confounder_effect.pow(2).mean())
+                loss = cls_loss
                 
-            elif loss_type == "kl+cosface":
-                logits_per_skl, logits_per_text = create_logits(fused_512, seen_language_512, self.logit_scale, exp=True)
-                ground_truth = torch.tensor(label_g, dtype=skleton_feat.dtype).cuda()
-                logits_per_skl -= ground_truth * m
-                logits_per_text -= ground_truth * m
-                loss_skls = self.loss(logits_per_skl, ground_truth)
-                loss_texts = self.loss(logits_per_text, ground_truth)
-                loss = (loss_skls + loss_texts) / 2
-            elif loss_type == "kl+sphereface":
-                logits_per_skl, logits_per_text = create_logits(fused_512, seen_language_512, self.logit_scale, exp=True)
-                ground_truth = torch.tensor(label_g, dtype=skleton_feat.dtype).cuda()
-                logits_per_skl = get_m_theta(logits_per_skl, m) * ground_truth + (1-ground_truth) * logits_per_skl
-                logits_per_text = get_m_theta(logits_per_text, m) * ground_truth + (1-ground_truth) * logits_per_text
-                loss_skls = self.loss(logits_per_skl, ground_truth)
-                loss_texts = self.loss(logits_per_text, ground_truth)
-                loss = (loss_skls + loss_texts) / 2
-            elif loss_type == "klv2":
-                logits_per_skl, logits_per_text = create_logits(fused_512, seen_language_512, self.logit_scale, exp=True)
-                ground_truth = torch.tensor(label_g, dtype=skleton_feat.dtype).cuda()
-                # ground_truth = gen_label_from_text_sim(seen_language)
-                loss_skls = self.loss(logits_per_skl, ground_truth)
-                loss_texts = self.loss(logits_per_text, ground_truth)
-                logit_skl_skl, logit_skl_skl_2 = create_logits(fused_512, skleton_feat, self.logit_scale, exp=True)
-                loss_skl_skl = self.loss(logit_skl_skl, ground_truth)
-                loss = alpha * (loss_skls + loss_texts) / 2 + beta * loss_skl_skl
-                # loss = (loss_skls + loss_texts + loss_skl_skl)/3
-
-            elif loss_type == "mse":
-                skl_skl_sim, skl_text_sim, text_text_sim = create_sim_matrix(fused_512, seen_language_512)
-                loss = self.loss(skl_text_sim, text_text_sim)*skl_text_sim.shape[0]
-            elif loss_type == "kl+mse":
-                logits_per_skl, logits_per_text = create_logits(fused_512, seen_language_512, self.logit_scale, exp=True)
-                ground_truth = torch.tensor(label_g, dtype=skleton_feat.dtype).cuda()
-                loss_skls = self.loss_kl(logits_per_skl, ground_truth)
-                loss_texts = self.loss_kl(logits_per_text, ground_truth)
-                loss_kl = (loss_skls + loss_texts) / 2
-                skl_skl_sim, skl_text_sim, text_text_sim = create_sim_matrix(fused_512, seen_language_512)
-                loss_mse = self.loss_mse(skl_text_sim, text_text_sim) #* skl_text_sim.shape[0]
-                # loss_mse += self.loss_mse(skl_skl_sim, text_text_sim) #* skl_text_sim.shape[0]
-                loss = alpha * loss_kl + beta * loss_mse
-            elif loss_type == "kl+kd":
-                margin = 0.5
-                logits_per_skl, logits_per_text = create_logits(fused_512, seen_language_512, self.logit_scale, exp=True)
-                ground_truth = torch.tensor(label_g, dtype=skleton_feat.dtype).cuda() # one-hot
-                loss_skls = self.loss(logits_per_skl, ground_truth)
-                loss_texts = self.loss(logits_per_text, ground_truth)
-                loss = (loss_skls + loss_texts) / 2
-                
-                logits_per_skl_v2, logits_per_text_v2 = create_logits(fused_512, seen_language_512, logit_scale=1, exp=False)
-                # logits_per_skl_v2, logits_per_text_v2 = logits_per_skl, logits_per_text
-                ground_truth_v2 = gen_label_from_text_sim(seen_language_512) + (ground_truth - 1) * margin # teacher logit
-                loss_skls_v2 = self.kd_loss(logits_per_skl_v2, ground_truth_v2)
-                loss_texts_v2 = self.kd_loss(logits_per_text_v2, ground_truth_v2)
-                kd_loss = (loss_skls_v2 + loss_texts_v2) / 2
-                loss = alpha * loss + beta * kd_loss
-            else:
-                raise Exception('loss_type Error!')
                 
             running_loss.append(loss)
             self.optimizer.zero_grad()
@@ -383,26 +319,21 @@ class Processor:
             
             rgb_feat = rgb.type(torch.FloatTensor).cuda()
             #rgb_feat = self.causal(rgb_feat,skeleton_feat)
-
+            
+            mamba_fused = self.mamba_fusion(rgb_feat,skeleton_feat);causal_out = self.causal(mamba_fused);mamba_fused = causal_out["feature"]
             #fusion_input = torch.cat([skeleton_feat, rgb_feat],dim=-1);fused_512 = self.concat_proj(fusion_input)
-            fused_512=self.fusion(skeleton_feat,rgb_feat)
+            #fused_512 = self.fusion(skeleton_feat,rgb_feat)
+            #fused_512 = self.temporal_mamba(fused_512)
+            
             #fused_512 = self.causal(fused_512,skeleton_feat)
             
+            #causal_out = self.causal(fused_512);fused_512 = causal_out["feature"]
             
-            causal_out = self.causal(fused_512)
-            fused_512 = causal_out["feature"]
-            if DA:
-            # acc_batch, pred = get_acc(feature, unseen_language, unseen_label, label)
-                acc_batch, pred, old_pred, ent, feat = get_acc_v2(fused_512, unseen_language_512, unseen_label, label)
-                ent_list.append(ent)
-                feat_list.append(feat)
-                old_pred_list.append(old_pred)
-            else:
-                acc_batch, pred = get_acc(fused_512, unseen_language_512, unseen_label, label)
+            feat = mamba_fused
+            acc_batch, pred = get_acc(feat, unseen_language_512, unseen_label, label)
         
             # y_p = pred.cpu().numpy().tolist()
             # y_pred += y_p
-
 
             acc_list.append(acc_batch)
 
@@ -432,7 +363,9 @@ class Processor:
         torch.save({'encoder':self.encoder.state_dict(),
                     'adapter':self.adapter.state_dict(),
                     'proj': self.proj.state_dict(),
-                    'fusion': self.fusion.state_dict(),
+                    'mamba_fusion': self.mamba_fusion.state_dict(),
+                    #'fusion': self.fusion.state_dict(),
+                    #'temporal_mamba': self.temporal_mamba.state_dict(),
                     'causal': self.causal.state_dict(),
                    }, save_path)
 

@@ -97,8 +97,8 @@ class CausalIntervention(nn.Module):
         conf_effect = torch.matmul(attn, v)
 
         # remove confounder
-        x_clean = x#x_clean = x - conf_effect
-
+        x_clean = x - conf_effect
+        #x_clean = x
         return x_clean, conf_effect
 
     def frontdoor_intervention(self, x_clean):
@@ -108,7 +108,8 @@ class CausalIntervention(nn.Module):
         """
         mediator = self.mediator(x_clean)
         causal_feature = x_clean + mediator
-
+        #causal_feature = x_clean
+        
         return causal_feature
 
     def counterfactual_feature(self, x):
@@ -136,16 +137,13 @@ class CausalIntervention(nn.Module):
         # ----------------------------------------
         # invariant representation
         # ----------------------------------------
-        invariant_feature = self.invariant_learning(
-            causal_feature
-        )
-
+        invariant_feature = self.invariant_learning(causal_feature)
+        #invariant_feature = causal_feature
+        
         # ----------------------------------------
         # counterfactual branch
         # ----------------------------------------
-        cf_feature = self.counterfactual_feature(
-            invariant_feature
-        )
+        cf_feature = self.counterfactual_feature(invariant_feature)
 
         # ----------------------------------------
         # gated fusion
@@ -157,8 +155,8 @@ class CausalIntervention(nn.Module):
             )
         )
 
-        out = gate * invariant_feature + \
-              (1 - gate) * x
+        out = gate * invariant_feature + (1 - gate) * x
+        #out = invariant_feature
         out = self.norm1(out)
         out = self.dropout(out)
 
