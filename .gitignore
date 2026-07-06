@@ -7,3 +7,17 @@ __pycache__/
 *.ckpt
 output/model/
 module/*.pt
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# model weights
+*.pt
+*.pth
+*.ckpt
+
+# generated outputs
+output/model/
+output/log/
+tsne_output/
