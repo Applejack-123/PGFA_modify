@@ -1,73 +1,137 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from .utils.tgcn import ConvTemporalGraphical
 from .utils.graph import Graph
 
 class Model(nn.Module):
-    def __init__(self, in_channels, hidden_channels, hidden_dim, graph_args,
-                 edge_importance_weighting, **kwargs):
+    r"""Spatial temporal graph convolutional networks.
+
+    支持两种输出：
+    1. return_sequence=False: 原始输出 [N, D]
+    2. return_sequence=True : 序列输出 [N, T, D]，用于 Mamba
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        hidden_channels,
+        hidden_dim,
+        graph_args,
+        edge_importance_weighting,
+        return_sequence=True,
+        keep_temporal=True,
+        **kwargs
+    ):
         super().__init__()
-        
+
+        self.return_sequence = return_sequence
+        self.keep_temporal = keep_temporal
+
         # load graph
         self.graph = Graph(**graph_args)
         A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
         self.register_buffer('A', A)
+
         self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
-        
+
+        # build networks
         spatial_kernel_size = A.size(0)
         temporal_kernel_size = 9
         kernel_size = (temporal_kernel_size, spatial_kernel_size)
+
         kwargs0 = {k: v for k, v in kwargs.items() if k != 'dropout'}
-        
+
+        # 如果 keep_temporal=True，则所有 temporal stride 都设为 1
+        # 输入 T=50，输出仍然 T=50
+        s_down = 1 if keep_temporal else 2
+
         self.st_gcn_networks = nn.ModuleList((
             st_gcn(in_channels, hidden_channels, kernel_size, 1, residual=False, **kwargs0),
             st_gcn(hidden_channels, hidden_channels, kernel_size, 1, **kwargs),
             st_gcn(hidden_channels, hidden_channels, kernel_size, 1, **kwargs),
             st_gcn(hidden_channels, hidden_channels, kernel_size, 1, **kwargs),
-            st_gcn(hidden_channels, hidden_channels * 2, kernel_size, 2, **kwargs),  # stride=2
+
+            # 原来这里是 stride=2，会把 T 下采样
+            st_gcn(hidden_channels, hidden_channels * 2, kernel_size, s_down, **kwargs),
+
             st_gcn(hidden_channels * 2, hidden_channels * 2, kernel_size, 1, **kwargs),
             st_gcn(hidden_channels * 2, hidden_channels * 2, kernel_size, 1, **kwargs),
-            st_gcn(hidden_channels * 2, hidden_channels * 4, kernel_size, 2, **kwargs),  # stride=2
+
+            # 原来这里也是 stride=2，会再次把 T 下采样
+            st_gcn(hidden_channels * 2, hidden_channels * 4, kernel_size, s_down, **kwargs),
+
             st_gcn(hidden_channels * 4, hidden_channels * 4, kernel_size, 1, **kwargs),
             st_gcn(hidden_channels * 4, hidden_dim, kernel_size, 1, **kwargs),
         ))
 
+        # initialize parameters for edge importance weighting
         if edge_importance_weighting:
             self.edge_importance = nn.ParameterList([
                 nn.Parameter(torch.ones(self.A.size()))
-                for i in self.st_gcn_networks
+                for _ in self.st_gcn_networks
             ])
         else:
             self.edge_importance = [1] * len(self.st_gcn_networks)
 
     def forward(self, x, ignore_joint=[]):
-        N, C, T, V, M = x.size()
-        
-        # data normalization
-        x = x.permute(0, 4, 3, 1, 2).contiguous()
-        x = x.view(N * M, V * C, T)
-        x = self.data_bn(x)
-        x = x.view(N, M, V, C, T)
-        x = x.permute(0, 1, 3, 4, 2).contiguous()
-        x = x.view(N * M, C, T, V)
+        """
+        Args:
+            x: [N, C, T, V, M]
 
+        Returns:
+            if return_sequence=True:
+                [N, T, D]
+            else:
+                [N, D]
+        """
+
+        # data normalization
+        N, C, T, V, M = x.size()
+
+        x = x.permute(0, 4, 3, 1, 2).contiguous()    # [N, M, V, C, T]
+        x = x.view(N * M, V * C, T)                  # [N*M, V*C, T]
+        x = self.data_bn(x)
+
+        x = x.view(N, M, V, C, T)
+        x = x.permute(0, 1, 3, 4, 2).contiguous()    # [N, M, C, T, V]
+        x = x.view(N * M, C, T, V)                   # [N*M, C, T, V]
+
+        # 获取未被 mask 掉的节点序列
         all_joint = set(range(V))
         remain_joint = list(all_joint - set(ignore_joint))
         remain_joint = sorted(remain_joint)
+
         x = x[:, :, :, remain_joint]
 
+        # ST-GCN backbone
         for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
             x, _ = gcn(x, self.A * importance, remain_joint)
-        
-        # T_out = T / 4 ≈ 12.5 → 13
-        x = x.mean(dim=-1)  # (N*M, hidden_dim, T_out)
-        x = x.view(N, M, -1, x.size(-1))  # (N, M, hidden_dim, T_out)
-        x = x.mean(dim=1)  # (N, hidden_dim, T_out)
-        
-        x = x.permute(0, 2, 1)
-        
-        return x
+
+        # 此时：
+        # x: [N*M, hidden_dim, T_out, V_remain]
+        # 如果 keep_temporal=True 且输入 T=50，则 T_out=50
+
+        if self.return_sequence:
+            # 只池化关节维 V，不池化时间维 T
+            x = x.mean(dim=3)                        # [N*M, D, T]
+
+            # 多人 M 维度平均
+            x = x.view(N, M, -1, x.size(-1))         # [N, M, D, T]
+            x = x.mean(dim=1)                        # [N, D, T]
+
+            # 转成 Mamba 需要的格式 [B, T, D]
+            x = x.permute(0, 2, 1).contiguous()      # [N, T, D]
+
+            return x
+
+        else:
+            # 原始 ST-GCN 输出方式：[N, D]
+            x = F.avg_pool2d(x, x.size()[2:])        # [N*M, D, 1, 1]
+            x = x.view(N, M, -1).mean(dim=1)         # [N, D]
+
+            return x
 
 
 class st_gcn(nn.Module):

@@ -11,16 +11,17 @@ import random
 from math import pi, cos
 from tqdm import tqdm
 
-from module.gcn.st_gcn import Model
+from module.gcn.st_gcnV2 import Model
 from module.shift_gcn import Model as ShiftGCN
 from module.adapter import Adapter, Linear
 from KLLoss import KLLoss, KDLoss
 from tool import gen_label, create_logits, get_acc, create_sim_matrix, gen_label_from_text_sim, get_m_theta, get_acc_v2
-from module.cross_attention_fusion import CrossAttentionFusion
-from cross_mamba import MambaFusion
-from align_mamba2_fusion import AlignMamba2Fusion
 
-from Causal import CausalIntervention as Causal
+from cross_mamba import MambaFusion
+from module.skeleton_mamba_encoder import SkeletonMambaEncoder
+from align_mamba2_fusion import AlignMamba2Fusion
+#from Causal import CausalIntervention as Causal
+from rgb_only_mlp import RGBOnlyModule as RGBModule
 def setup_seed(seed):
      torch.manual_seed(seed)
      torch.cuda.manual_seed_all(seed)
@@ -70,10 +71,10 @@ class Processor:
         
         if model is self.encoder and 'encoder' in checkpoint:
             model.load_state_dict(checkpoint['encoder'])
-        elif model is self.adapter and 'adapter' in checkpoint:
-            model.load_state_dict(checkpoint['adapter'])
         elif model is self.proj and 'proj' in checkpoint:
             model.load_state_dict(checkpoint['proj'])
+        elif model is self.rgb_mlp and 'rgb_mlp' in checkpoint:
+            model.load_state_dict(checkpoint['rgb_mlp'])
         elif model is self.fusion and 'fusion' in checkpoint:
             missing, unexpected = model.load_state_dict(checkpoint['fusion'],strict=False)
         else:
@@ -108,26 +109,39 @@ class Processor:
         return out
 
     @ex.capture
-    def load_model(self,in_channels,hidden_channels,hidden_dim,
-                    dropout,graph_args,edge_importance_weighting, visual_size, language_size, weight_path, loss_type, fix_encoder, finetune):
-        self.encoder = Model(in_channels=in_channels, hidden_channels=hidden_channels,
-                            hidden_dim=hidden_dim,dropout=dropout, 
-                            graph_args=graph_args,
-                            edge_importance_weighting=edge_importance_weighting,
-                            ).cuda()
-        
-        self.adapter = Linear().cuda()
+    def load_model(self, in_channels, hidden_channels, hidden_dim,
+                    dropout, graph_args, edge_importance_weighting,
+                    visual_size, language_size, weight_path, loss_type,
+                    fix_encoder, finetune):
+
+        self.encoder = SkeletonMambaEncoder(
+            in_channels=3,
+            num_point=25,
+            num_person=2,
+            embed_dim=hidden_dim,
+            temporal_depth=2,
+            dropout=0.1,
+        ).cuda()
 
         self.proj = nn.Sequential(
-        nn.LayerNorm(language_size),
-        nn.Linear(language_size, 512),
-        nn.ReLU(),
-        nn.Dropout(0.3)
+            nn.LayerNorm(language_size),
+            nn.Linear(language_size, 512),
+            nn.ReLU(),
+            nn.Dropout(0.3)
         ).cuda()
         
-        
+        self.rgb_mlp = RGBModule(
+        dim=512,
+        hidden_dim=1024,
+        depth=2,
+        temporal_depth=1,
+        dropout=0.1,
+        use_temporal=True,
+        pool="mean",   # also "attn"
+        ).cuda()
+
         self.fusion = AlignMamba2Fusion(
-            skel_dim=256,
+            skel_dim=512,
             rgb_dim=512,
             text_dim=512,
             dim=512,
@@ -137,14 +151,9 @@ class Processor:
             lambda_ot=0.001,
             lambda_mmd=0.01,
             use_text_in_fusion=False,
-            use_causal=False,
+            use_causal=True,
         ).cuda()
 
-        '''
-        self.causal = Causal(dim=512).cuda()
-        self.mamba_fusion = MambaFusion(num_layers=4).cuda()
-        self.temporal_mamba = nn.Sequential(TemporalMamba(512),TemporalMamba(512)).cuda()
-        '''
         if loss_type == "kl" or loss_type == "klv2" or loss_type == "kl+cosface" or loss_type == "kl+sphereface" or "kl+margin":
             self.loss = KLLoss().cuda()
         elif loss_type == "mse":
@@ -157,82 +166,88 @@ class Processor:
             self.kd_loss = KDLoss().cuda()
         else:
             raise Exception('loss_type Error!')
-        self.logit_scale = self.adapter.get_logit_scale()
-        self.logit_scale_v2 = self.adapter.get_logit_scale_v2()
-        
+
+        self.logit_scale = self.fusion.logit_scale
+
         if fix_encoder or finetune:
             self.load_weights(self.encoder, weight_path)
-            self.load_weights(self.adapter, weight_path)
             self.load_weights(self.proj, weight_path)
-            #self.load_weights(self.fusion, weight_path)
-            #self.load_weights(self.temporal_mamba, weight_path)
-            #self.load_weights(self.causal, weight_path)
-            #self.load_weights(self.mamba_fusion, weight_path)
-            #self.load_weights(self.concat_proj, weight_path)
+            self.load_weights(self.rgb_mlp, weight_path)
+            self.load_weights(self.fusion, weight_path)
 
-
+            
+            
     @ex.capture
     def load_optim(self, lr, epoch_num, weight_decay):
+        #self.freeze_fusion_except_causal()
         
-        self.optimizer = torch.optim.SGD([
-            #{'params': self.encoder.parameters()},
-            #{'params': self.adapter.parameters()},
-            #{'params': self.proj.parameters()},
-            {'params': self.fusion.parameters()},
-            #{'params': self.mamba_fusion.parameters()},
-            #{'params': self.temporal_mamba.parameters()},
-            #{'params': self.causal.parameters()}
+        self.optimizer = torch.optim.AdamW(
+            [
+                {"params": self.fusion.causal.parameters(), "lr": lr, "weight_decay": 1e-4},
             ],
-             lr=lr,
+            betas=(0.9, 0.999)
+        )
+        '''
+        self.optimizer = torch.optim.SGD([
+            #{'params': self.encoder.parameters(),'lr': lr*0.01},
+            #{'params': self.proj.parameters(),'lr': lr*0.001},
+            {'params': self.fusion.parameters(),'lr': lr},
+            #{'params': self.rgb_mlp.parameters(),'lr': lr},
+            ],
              weight_decay=weight_decay,
              momentum=0.9,
              nesterov=False
              )
         '''
-        self.optimizer = torch.optim.AdamW(
-        [
-        {'params': self.causal.parameters(),    'lr': lr, 'weight_decay': 0.01},
-        {'params': self.mamba_fusion.parameters(), 'lr': 1e-8, 'weight_decay': 0.01},
-        ],
-        betas=(0.9, 0.999)
-        )
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=100, eta_min=1e-6)
-        '''
+        
+        #self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=40, eta_min=1e-6)
+        
     @ex.capture
-    def optimize(self, epoch_num, DA): # print -> log.info
+    def optimize(self, epoch_num, DA):
         self.log.info("main track")
 
         with torch.no_grad():
             self.test_epoch(epoch=-1)
         self.log.info("before train test acc: {}".format(self.test_acc))
-        
+
         for epoch in range(epoch_num):
             self.train_epoch(epoch)
+
             with torch.no_grad():
                 self.test_epoch(epoch=epoch)
-            self.log.info("epoch [{}] train loss: {}".format(epoch,self.dim_loss))
-            self.log.info("epoch [{}] test acc: {}".format(epoch,self.test_acc))
-            self.log.info("epoch [{}] gets the best acc: {}".format(self.best_epoch,self.best_acc))
+
+            self.log.info("epoch [{}] train loss: {}".format(epoch, self.dim_loss))
+            self.log.info("epoch [{}] test acc: {}".format(epoch, self.test_acc))
+            self.log.info("epoch [{}] gets the best acc: {}".format(self.best_epoch, self.best_acc))
+
+            if hasattr(self.fusion, "causal") and self.fusion.causal is not None:
+                if hasattr(self.fusion.causal, "alpha"):
+                    self.log.info(
+                        "causal alpha: {}".format(
+                            torch.tanh(self.fusion.causal.alpha).item()
+                        )
+                    )
+                if hasattr(self.fusion.causal, "conf_scale"):
+                    self.log.info(
+                        "conf scale: {}".format(
+                            torch.tanh(self.fusion.causal.conf_scale).item()
+                        )
+                    )
+
             if DA:
-                self.log.info("epoch [{}] DA test acc: {}".format(epoch,self.test_aug_acc))
-                self.log.info("epoch [{}] gets the best DA acc: {}".format(self.best_aug_epoch,self.best_aug_acc))
-            # if epoch > 5:
-            #     self.log.info("epoch [{}] test acc: {}".format(epoch,self.test_acc))
-            #     self.log.info("epoch [{}] gets the best acc: {}".format(self.best_epoch,self.best_acc))
-            # else:
-            #     self.log.info("epoch [{}] : warm up epoch.".format(epoch))
+                self.log.info("epoch [{}] DA test acc: {}".format(epoch, self.test_aug_acc))
+                self.log.info("epoch [{}] gets the best DA acc: {}".format(self.best_aug_epoch, self.best_aug_acc))
 
     @ex.capture
     def train_epoch(self, epoch, lr, loss_mode, step, loss_type, alpha, beta, m, fix_encoder):
-        self.encoder.train() # eval -> train
-        self.adapter.train()
+        self.encoder.train()
         self.proj.train()
         self.fusion.train()
-        #self.causal.train()
+        self.rgb_mlp.train()
         if fix_encoder:
             self.encoder.eval()
-            self.adapter.eval()
             self.proj.eval()
+            self.rgb_mlp.eval()
             #self.fusion.eval()
             
         self.adjust_learning_rate(self.optimizer, current_epoch=epoch, max_epoch=50, lr_max=lr, warmup_epoch=5, loss_mode=loss_mode, step=step)
@@ -247,14 +262,15 @@ class Processor:
             seen_language = self.proj(seen_language)# 512
             
             skeleton_feat = self.encoder(data)# 128, 13, 256
-            skeleton_feat = self.adapter(skeleton_feat)# 128, 13, 512
             
             rgb_feat = rgb.type(torch.FloatTensor).cuda()# 128, 8, 512
+            rgb_feat = self.rgb_mlp(rgb_feat)
             
             #fusion_input = torch.cat([skeleton_feat, rgb_feat],dim=-1);fused_512 = self.concat_proj(fusion_input)
             #fused_512 = self.fusion(skeleton_feat,rgb_feat)# 128, 8, 512
             #mamba_fused = self.mamba_fusion(rgb_feat,skeleton_feat);causal_out = self.causal(mamba_fused);mamba_fused = causal_out["feature"]
             #fused_512 = self.temporal_mamba(fused_512)
+            
             #causal_out = self.causal(fused_512);fused_512 = causal_out["feature"]
             
             out = self.fusion(skeleton_feat,rgb_feat,seen_language,labels=label,);fusion_feature = out["fusion_feature"]
@@ -270,8 +286,7 @@ class Processor:
                 #cf_loss = F.mse_loss(invariant_feature,counterfactual_feature)
                 #conf_loss = (confounder_effect.pow(2).mean())
                 loss = cls_loss
-                
-                
+                                
             running_loss.append(loss)
             self.optimizer.zero_grad()
             loss.backward()
@@ -279,14 +294,14 @@ class Processor:
 
         running_loss = torch.tensor(running_loss)
         self.dim_loss = running_loss.mean().item()
-
+        
+        
     @ex.capture
     def test_epoch(self, unseen_label, epoch, DA, support_factor):
         self.encoder.eval()
-        self.adapter.eval()
         self.proj.eval()
         self.fusion.eval()
-        #self.causal.eval()
+        self.rgb_mlp.eval()
 
         loader = self.data_loader['test']
         y_true = []
@@ -300,25 +315,24 @@ class Processor:
             data = data.type(torch.FloatTensor).cuda()
             label = label.type(torch.LongTensor).cuda()
             rgb_feat = rgb.type(torch.FloatTensor).cuda()
+            rgb_feat = self.rgb_mlp(rgb_feat)
 
             unseen_language = self.full_language[unseen_label]
-            unseen_language = self.proj(unseen_language)
+            unseen_language_512=self.proj(unseen_language)
             
             skeleton_feat = self.encoder(data)
-            skeleton_feat = self.adapter(skeleton_feat)
+            #skeleton_feat = self.adapter(skeleton_feat)
             
-            rgb_feat = rgb.type(torch.FloatTensor).cuda()
-            #rgb_feat = self.causal(rgb_feat,skeleton_feat)
             
             #mamba_fused = self.mamba_fusion(rgb_feat,skeleton_feat);causal_out = self.causal(mamba_fused);mamba_fused = causal_out["feature"]
             #fusion_input = torch.cat([skeleton_feat, rgb_feat],dim=-1);fused_512 = self.concat_proj(fusion_input)
             #fused_512 = self.fusion(skeleton_feat,rgb_feat)
             #fused_512 = self.causal(fused_512,skeleton_feat)
-            #causal_out = self.causal(fused_512);fused_512 = causal_out["feature"]
+            
             out = self.fusion(skeleton_feat,rgb_feat,text_feat=None,labels=None,return_align_loss=False,);fusion_feature = out["fusion_feature"]
             
             feat = fusion_feature
-            acc_batch, pred = get_acc(feat, unseen_language, unseen_label, label)
+            acc_batch, pred = get_acc(feat, unseen_language_512, unseen_label, label)
         
             # y_p = pred.cpu().numpy().tolist()
             # y_pred += y_p
@@ -331,11 +345,6 @@ class Processor:
             self.best_acc = acc
             self.best_epoch = epoch
             self.save_model()
-            # y_true = np.array(y_true)
-            # y_pred = np.array(y_pred)
-            # np.save("y_true_3.npy",y_true)
-            # np.save("y_pred_3.npy",y_pred)
-            # print("save ok!")
         self.test_acc = acc
 
 
@@ -349,9 +358,9 @@ class Processor:
     def save_model(self, save_path):
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         torch.save({'encoder':self.encoder.state_dict(),
-                    'adapter':self.adapter.state_dict(),
+                    #'adapter':self.adapter.state_dict(),
                     'proj': self.proj.state_dict(),
-                    #'mamba_fusion': self.mamba_fusion.state_dict(),
+                    'rgb_mlp': self.rgb_mlp.state_dict(),
                     'fusion': self.fusion.state_dict(),
                     #'temporal_mamba': self.temporal_mamba.state_dict(),
                     #'causal': self.causal.state_dict(),

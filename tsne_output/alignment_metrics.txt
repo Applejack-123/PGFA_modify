@@ -1,0 +1,17 @@
+================================================================================
+Fusion Test Acc          : 0.851184
+Skeleton-Text Cosine     : 0.116509
+RGB-Text Cosine          : 0.012125
+Fusion-Text Cosine       : 0.152307
+Skeleton-Text L2 Distance: 1.326536
+RGB-Text L2 Distance     : 1.404899
+Fusion-Text L2 Distance  : 1.298289
+Text mapping max diff    : 0.0000000596
+================================================================================
+Per-class alignment:
+Class   4 | Num  275 | SK Cos 0.0324 | RGB Cos 0.0843 | Fusion Cos 0.0953 | SK L2 1.3901 | RGB L2 1.3531 | Fusion L2 1.3434
+Class  19 | Num  272 | SK Cos 0.2383 | RGB Cos -0.0938 | Fusion Cos 0.2712 | SK L2 1.2321 | RGB L2 1.4789 | Fusion L2 1.2038
+Class  31 | Num  276 | SK Cos 0.0394 | RGB Cos 0.0131 | Fusion Cos 0.0280 | SK L2 1.3858 | RGB L2 1.4048 | Fusion L2 1.3942
+Class  47 | Num  275 | SK Cos 0.0674 | RGB Cos 0.0288 | Fusion Cos 0.1008 | SK L2 1.3649 | RGB L2 1.3936 | Fusion L2 1.3397
+Class  51 | Num  276 | SK Cos 0.2063 | RGB Cos 0.0270 | Fusion Cos 0.2676 | SK L2 1.2589 | RGB L2 1.3949 | Fusion L2 1.2094
+================================================================================
