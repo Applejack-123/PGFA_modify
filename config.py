@@ -3,14 +3,12 @@ from sacred import Experiment
 
 ex = Experiment("baseline", save_git_info=False)
 
-loadf = True
-
 @ex.config
 def my_config():
     track = "main" # main or sota
-    split = '1'
+    split = '10'
     dataset = "ntu60" # ntu60: split 1-3, sota_split 5,12; ntu120: split 4-6, sota_split 10,24; pku: split 7-9
-    lr = 0.0005 # 0.05 for ntu60 and pku, 0.005 for ntu120
+    lr = 0.001 # 0.05 for ntu60 and pku, 0.005 for ntu120
     margin = 0.1
     weight_decay = 0.0005
     epoch_num = 40
@@ -20,15 +18,13 @@ def my_config():
     beta = 1
     m = 1
     DA = False # DA means using our prototype-guided text feature alignment
-    fix_encoder = loadf
-    finetune = loadf
+    fix_encoder = True
     support_factor = 0.9 # 0.9 for ntu60, 0.4 for ntu120, 1.0 for pku
-    #weight_path= './output/model/split_1_kl_DA_des_support_factor0.9_lr0.005.pt'
-    weight_path = './module/enco+proj+rgbMLP+fusi+causal_T50.pt'
-    log_path = './output/log/split_{}_{}_DA_des_support_factor{}_lr{}.log'.format(split,loss_type,support_factor,lr)
-    # log_path = './output/log/sota_split10_des_DA_epoch100_lr{}_support_factor{}.log'.format(lr, support_factor)
-
-    save_path = './output/model/split_{}_{}_DA_des_support_factor{}_lr{}.pt'.format(split,loss_type,support_factor,lr)
+    #weight_path= './output/model/split_1_kl_DA_des_support_factor0.9_lr0.001.pt'
+    #weight_path = './module/split_{}_fusion.pt'.format(split)
+    weight_path = './weights/split_{}_rgb.pt'.format(split)
+    log_path = './output/log/split_{}_support_factor{}_lr{}.log'.format(split,support_factor,lr)
+    save_path = './output/model/split_{}_support_factor{}_lr{}.pt'.format(split,support_factor,lr)
     loss_mode = "cos" # "step" or "cos"
     step = [20, 30]
     ############################## ST-GCN ###############################
@@ -51,6 +47,8 @@ def my_config():
     split_7 = [1, 9, 20, 34, 50]
     split_8 = [3, 14, 29, 31, 49]
     split_9 = [2, 15, 39, 41, 43]
+    
+    split_10 = [3,5,9,12,15,40,42,47,51,56,58,59]
     unseen_label = eval('split_'+split)
     visual_size = 256
     language_size = 768
@@ -61,8 +59,8 @@ def my_config():
     test_list = "../PGFA/data/zeroshot/"+dataset+"/split_"+split+"/unseen_data.npy"
     test_label = "../PGFA/data/zeroshot/"+dataset+"/split_"+split+"/unseen_label.npy"
 
-    train_rgb = "../../datasets/clip_temporal/seen_train_temporal_rgb.npy"
-    test_rgb = "../../datasets/clip_temporal/unseen_temporal_rgb.npy"
+    train_rgb = "../../datasets/ntu60_rgb/split_"+split+"/seen_train_temporal_rgb.npy"
+    test_rgb = "../../datasets/ntu60_rgb/split_"+split+"/unseen_temporal_rgb.npy"
     ############################ sota compare ############################
     sota_split = "5" # 5 or 12 or 10 or 24 
     model_choice_for_sota = 'shift-gcn' # shift-gcn or st-gcn

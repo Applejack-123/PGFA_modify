@@ -221,7 +221,7 @@ class AlignMamba2Fusion(nn.Module):
 
         self.skel_proj = nn.Linear(skel_dim, dim)
         self.rgb_proj = nn.Linear(rgb_dim, dim)
-        self.text_proj = nn.Linear(text_dim, dim)
+        self.text_proj = nn.Linear(rgb_dim, dim)
 
         self.fusion_layers = nn.ModuleList([
             ModalityAwareMambaBlock(

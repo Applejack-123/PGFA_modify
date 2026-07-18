@@ -1,4 +1,0 @@
-[2026-07-05 13:04:24,184][INFO] Start
-[2026-07-05 13:04:24,184][INFO] oracle track
-[2026-07-05 13:04:26,965][INFO] Oracle result: {'num_samples': 1374, 'skl_acc': 0.7933042049407959, 'rgb_acc': 0.8384279608726501, 'fusion_acc': 0.8791848421096802, 'oracle_skl_rgb_acc': 0.9155749678611755, 'oracle_all_acc': 0.943231463432312, 'oracle_gap_vs_fusion': 0.03639012575149536, 'both_skl_rgb_correct': 0.7161571979522705, 'only_skl_correct': 0.07714701443910599, 'only_rgb_correct': 0.12227074056863785, 'both_skl_rgb_wrong': 0.08442503958940506, 'fusion_gate_mean': 0.5029680132865906}
-[2026-07-05 13:04:26,968][INFO] Completed after 0:00:04

@@ -21,3 +21,4 @@ module/*.pt
 output/model/
 output/log/
 tsne_output/
+weights/
